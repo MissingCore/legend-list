@@ -101,6 +101,7 @@ const LegendListInner = typedForwardRef(function LegendListInner<T>(
         viewabilityConfig,
         viewabilityConfigCallbackPairs,
         onViewableItemsChanged,
+        disableScrollTopOnDataChange = false,
         ...rest
     } = props;
 
@@ -1168,7 +1169,7 @@ const LegendListInner = typedForwardRef(function LegendListInner<T>(
                         state.anchorElement = newAnchorElement;
                         state.belowAnchorElementPositions?.clear();
                         // reset scroll to 0 and schedule rerender
-                        scrollTo(0, false);
+                        if (!disableScrollTopOnDataChange) scrollTo(0, false);
                         setTimeout(() => {
                             calculateItemsInView();
                         }, 0);
@@ -1185,7 +1186,7 @@ const LegendListInner = typedForwardRef(function LegendListInner<T>(
                         state.startBufferedId = undefined;
                     }
                     // reset scroll to 0 and schedule rerender
-                    scrollTo(0, false);
+                    if (!disableScrollTopOnDataChange) scrollTo(0, false);
                     setTimeout(() => {
                         calculateItemsInView();
                     }, 0);

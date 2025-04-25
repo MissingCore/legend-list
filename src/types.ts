@@ -238,6 +238,11 @@ export type LegendListPropsBase<
      * @default false
      */
     waitForInitialLayout?: boolean;
+    /**
+     * If true, prevent the list from scrolling to the top when the data changes.
+     * @default false
+     */
+    disableScrollTopOnDataChange?: boolean;
 };
 
 export interface ColumnWrapperStyle {
