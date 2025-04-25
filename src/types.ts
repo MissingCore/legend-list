@@ -34,9 +34,8 @@ export type LegendListPropsBase<
 
     /**
      * Array of items to render in the list.
-     * @required
      */
-    data: ReadonlyArray<ItemT>;
+    data?: ReadonlyArray<ItemT>;
 
     /**
      * Distance in pixels to pre-render items ahead of the visible area.
