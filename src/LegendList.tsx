@@ -16,7 +16,7 @@ import { DebugView } from "./DebugView";
 import { ListComponent } from "./ListComponent";
 import { ScrollAdjustHandler } from "./ScrollAdjustHandler";
 import { ANCHORED_POSITION_OUT_OF_VIEW, ENABLE_DEBUG_VIEW, IsNewArchitecture, POSITION_OUT_OF_VIEW } from "./constants";
-import { roundSize, warnDevOnce } from "./helpers";
+import { isNullOrUndefined, roundSize, warnDevOnce } from "./helpers";
 import { StateProvider, getContentSize, peek$, set$, useStateContext } from "./state";
 import type {
     AnchoredPosition,
@@ -82,7 +82,7 @@ const LegendListInner = typedForwardRef(function LegendListInner<T>(
         columnWrapperStyle,
         keyExtractor: keyExtractorProp,
         renderItem,
-        estimatedItemSize,
+        estimatedItemSize: estimatedItemSizeProp,
         getEstimatedItemSize,
         suggestEstimatedItemSize,
         ListEmptyComponent,
@@ -134,6 +134,7 @@ const LegendListInner = typedForwardRef(function LegendListInner<T>(
 
     const refScroller = useRef<ScrollView>(null) as React.MutableRefObject<ScrollView>;
     const combinedRef = useCombinedRef(refScroller, refScrollView);
+    const estimatedItemSize = estimatedItemSizeProp ?? DEFAULT_ITEM_SIZE;
     const scrollBuffer = (drawDistance ?? DEFAULT_DRAW_DISTANCE) || 1;
     const keyExtractor = keyExtractorProp ?? ((item, index) => index.toString());
 
@@ -177,7 +178,7 @@ const LegendListInner = typedForwardRef(function LegendListInner<T>(
 
         // Get estimated size if we don't have an average or already cached size
         if (size === undefined) {
-            size = (getEstimatedItemSize ? getEstimatedItemSize(index, data) : estimatedItemSize) ?? DEFAULT_ITEM_SIZE;
+            size = getEstimatedItemSize ? getEstimatedItemSize(index, data) : estimatedItemSize;
         }
 
         // Save to rendered sizes
@@ -200,7 +201,7 @@ const LegendListInner = typedForwardRef(function LegendListInner<T>(
                 for (let i = 0; i < index; i++) {
                     offset += sizeFn(i);
                 }
-            } else if (estimatedItemSize) {
+            } else {
                 offset = index * estimatedItemSize;
             }
 
@@ -308,6 +309,12 @@ const LegendListInner = typedForwardRef(function LegendListInner<T>(
         viewPosition = 0,
     }: Parameters<LegendListRef["scrollToIndex"]>[0]) => {
         const state = refState.current!;
+        if (index >= state.data.length) {
+            index = state.data.length - 1;
+        } else if (index < 0) {
+            index = 0;
+        }
+
         const firstIndexOffset = calculateOffsetForIndex(index);
         let firstIndexScrollPostion = firstIndexOffset - viewOffset;
         const diff = Math.abs(state.scroll - firstIndexScrollPostion);
@@ -339,17 +346,8 @@ const LegendListInner = typedForwardRef(function LegendListInner<T>(
         }
 
         // Disable scroll adjust while scrolling so that it doesn't do extra work affecting the target offset
-        state.scrollAdjustHandler.setDisableAdjust(true);
-        state.scrollingToOffset = firstIndexScrollPostion;
         // Do the scroll
         scrollTo(firstIndexScrollPostion, animated);
-
-        if (!animated) {
-            requestAnimationFrame(() => {
-                state.scrollingToOffset = undefined;
-                state.scrollAdjustHandler.setDisableAdjust(false);
-            });
-        }
     };
 
     const setDidLayout = () => {
@@ -467,6 +465,20 @@ const LegendListInner = typedForwardRef(function LegendListInner<T>(
         return map;
     };
 
+    const disableScrollJumps = (timeout: number) => {
+        const state = refState.current!;
+
+        // Don't disable scroll jumps if we're not scrolling to an offset
+        // Resetting containers can cause a jump, so we don't want to disable scroll jumps in that case
+        if (state.scrollingToOffset === undefined) {
+            state.disableScrollJumpsFrom = state.scroll - state.scrollAdjustHandler.getAppliedAdjust();
+
+            setTimeout(() => {
+                state.disableScrollJumpsFrom = undefined;
+            }, timeout);
+        }
+    };
+
     const getElementPositionBelowAchor = (id: string) => {
         const state = refState.current!;
         if (!refState.current!.belowAnchorElementPositions) {
@@ -551,6 +563,21 @@ const LegendListInner = typedForwardRef(function LegendListInner<T>(
         }
     }, []);
 
+    const checkAllSizesKnown = useCallback(() => {
+        const { startBuffered, endBuffered, sizesKnown } = refState.current!;
+        if (endBuffered !== null) {
+            // If waiting for initial layout and all items in view have a known size then
+            // initial layout is complete
+            let areAllKnown = true;
+            for (let i = startBuffered!; areAllKnown && i <= endBuffered!; i++) {
+                const key = getId(i)!;
+                areAllKnown &&= sizesKnown.has(key);
+            }
+            return areAllKnown;
+        }
+        return false;
+    }, []);
+
     const calculateItemsInView = useCallback(() => {
         const state = refState.current!;
         const {
@@ -561,7 +588,6 @@ const LegendListInner = typedForwardRef(function LegendListInner<T>(
             columns,
             scrollAdjustHandler,
             scrollVelocity: speed,
-            disableAveragesForScrolls,
         } = state!;
         if (!data || scrollLength === 0) {
             return;
@@ -573,7 +599,10 @@ const LegendListInner = typedForwardRef(function LegendListInner<T>(
         const previousScrollAdjust = scrollAdjustHandler.getAppliedAdjust();
         const scrollExtra = Math.max(-16, Math.min(16, speed)) * 16;
         let scrollState = state.scroll;
-        const useAverageSize = !disableAveragesForScrolls;
+        // Don't use averages when disabling scroll jumps because adding items to the top of the list
+        // causes jumpiness if using averages
+        // TODO Figure out why using average caused jumpiness, maybe we can fix it a better way
+        const useAverageSize = !state.disableScrollJumpsFrom && speed >= 0 && peek$(ctx, "containersDidLayout");
 
         // If this is before the initial layout, and we have an initialScrollIndex,
         // then ignore the actual scroll which might be shifting due to scrollAdjustHandler
@@ -684,8 +713,11 @@ const LegendListInner = typedForwardRef(function LegendListInner<T>(
             return topOffset;
         };
 
+        let foundEnd = false;
+
         // scan data forwards
-        for (let i = Math.max(0, loopStart); i < data!.length; i++) {
+        // Continue until we've found the end and we've updated positions of all items that were previously in view
+        for (let i = Math.max(0, loopStart); i < data!.length && (!foundEnd || i <= prevEndBuffered); i++) {
             const id = getId(i)!;
             const size = getItemSize(id, i, data[i], useAverageSize);
 
@@ -703,21 +735,23 @@ const LegendListInner = typedForwardRef(function LegendListInner<T>(
                 columns.set(id, column);
             }
 
-            if (startNoBuffer === null && top + size > scroll) {
-                startNoBuffer = i;
-            }
-            if (startBuffered === null && top + size > scroll - scrollBufferTop) {
-                startBuffered = i;
-                startBufferedId = id;
-            }
-            if (startNoBuffer !== null) {
-                if (top <= scrollBottom) {
-                    endNoBuffer = i;
+            if (!foundEnd) {
+                if (startNoBuffer === null && top + size > scroll) {
+                    startNoBuffer = i;
                 }
-                if (top <= scrollBottom + scrollBufferBottom) {
-                    endBuffered = i;
-                } else {
-                    break;
+                if (startBuffered === null && top + size > scroll - scrollBufferTop) {
+                    startBuffered = i;
+                    startBufferedId = id;
+                }
+                if (startNoBuffer !== null) {
+                    if (top <= scrollBottom) {
+                        endNoBuffer = i;
+                    }
+                    if (top <= scrollBottom + scrollBufferBottom) {
+                        endBuffered = i;
+                    } else {
+                        foundEnd = true;
+                    }
                 }
             }
 
@@ -759,6 +793,7 @@ const LegendListInner = typedForwardRef(function LegendListInner<T>(
             const prevNumContainers = ctx.values.get("numContainers") as number;
             let numContainers = prevNumContainers;
             let didWarnMoreContainers = false;
+            const allocatedContainers = new Set<number>();
             for (let i = startBuffered; i <= endBuffered; i++) {
                 let isContained = false;
                 const id = getId(i)!;
@@ -780,6 +815,9 @@ const LegendListInner = typedForwardRef(function LegendListInner<T>(
                     // Note that since this is only checking top it may not be 100% accurate but that's fine.
 
                     for (let u = 0; u < numContainers; u++) {
+                        if (allocatedContainers.has(u)) {
+                            continue;
+                        }
                         const key = peek$(ctx, `containerItemKey${u}`);
                         // Hasn't been allocated yet, just use it
                         if (key === undefined) {
@@ -790,21 +828,27 @@ const LegendListInner = typedForwardRef(function LegendListInner<T>(
                         const index = state.indexByKey.get(key)!;
                         const pos = peek$(ctx, `containerPosition${u}`).top;
 
+                        if (isNullOrUndefined(index) || pos === POSITION_OUT_OF_VIEW) {
+                            furthestIndex = u;
+                            break;
+                        }
+
                         if (index < startBuffered || index > endBuffered) {
                             const distance = Math.abs(pos - top);
-                            if (index < 0 || distance > furthestDistance) {
+                            if (index < 0 || pos === POSITION_OUT_OF_VIEW || distance > furthestDistance) {
                                 furthestDistance = distance;
                                 furthestIndex = u;
                             }
                         }
                     }
-                    if (furthestIndex >= 0) {
-                        set$(ctx, `containerItemKey${furthestIndex}`, id);
-                        const index = state.indexByKey.get(id)!;
-                        set$(ctx, `containerItemData${furthestIndex}`, data[index]);
-                    } else {
-                        const containerId = numContainers;
 
+                    const containerId = furthestIndex >= 0 ? furthestIndex : numContainers;
+                    set$(ctx, `containerItemKey${containerId}`, id);
+                    const index = state.indexByKey.get(id)!;
+                    set$(ctx, `containerItemData${containerId}`, data[index]);
+                    allocatedContainers.add(containerId);
+
+                    if (furthestIndex === -1) {
                         numContainers++;
                         set$(ctx, `containerItemKey${containerId}`, id);
                         const index = state.indexByKey.get(id)!;
@@ -817,8 +861,7 @@ const LegendListInner = typedForwardRef(function LegendListInner<T>(
                         if (__DEV__ && !didWarnMoreContainers && numContainers > peek$(ctx, "numContainersPooled")) {
                             didWarnMoreContainers = true;
                             console.warn(
-                                "[legend-list] No container to recycle, so creating one on demand. This can be a minor performance issue and is likely caused by the estimatedItemSize being too large. Consider decreasing estimatedItemSize. numContainers:",
-                                numContainers,
+                                "[legend-list] No container to recycle, so creating one on demand. This can be a minor performance issue and is likely caused by the estimatedItemSize being too large. Consider decreasing estimatedItemSize or increasing initialContainerPoolRatio.",
                             );
                         }
                     }
@@ -841,25 +884,16 @@ const LegendListInner = typedForwardRef(function LegendListInner<T>(
                 const item = data[itemIndex];
                 if (item !== undefined) {
                     const id = getId(itemIndex);
-                    if (itemKey !== id || itemIndex < startBuffered || itemIndex > endBuffered) {
-                        // This is fairly complex because we want to avoid setting container position if it's not even in view
-                        // because it will trigger a render
-                        const prevPos = peek$(ctx, `containerPosition${i}`);
-                        const pos = positions.get(id) || 0;
-                        const size = getItemSize(id, itemIndex, data[i]);
-
-                        if (
-                            (pos + size >= scroll && pos <= scrollBottom) ||
-                            (prevPos + size >= scroll && prevPos <= scrollBottom) ||
-                            endBuffered < prevEndBuffered
-                        ) {
-                            set$(ctx, `containerPosition${i}`, ANCHORED_POSITION_OUT_OF_VIEW);
-                        }
+                    const position = positions.get(id);
+                    if (position === undefined) {
+                        // This item may have been in view before data changed and positions were reset
+                        // so we need to set it to out of view
+                        set$(ctx, `containerPosition${i}`, ANCHORED_POSITION_OUT_OF_VIEW);
                     } else {
                         const pos: AnchoredPosition = {
                             type: "top",
-                            relativeCoordinate: positions.get(id) || 0,
-                            top: positions.get(id) || 0,
+                            relativeCoordinate: positions.get(id)!,
+                            top: positions.get(id)!,
                         };
                         const column = columns.get(id) || 1;
 
@@ -895,12 +929,7 @@ const LegendListInner = typedForwardRef(function LegendListInner<T>(
         if (!state.queuedInitialLayout && endBuffered !== null) {
             // If waiting for initial layout and all items in view have a known size then
             // initial layout is complete
-            let areAllKnown = true;
-            for (let i = startBuffered!; areAllKnown && i <= endBuffered!; i++) {
-                const key = getId(i)!;
-                areAllKnown &&= state.sizesKnown.has(key);
-            }
-            if (areAllKnown) {
+            if (checkAllSizesKnown()) {
                 setDidLayout();
             }
         }
@@ -961,12 +990,31 @@ const LegendListInner = typedForwardRef(function LegendListInner<T>(
         }
     };
 
+    const finishScrollTo = () => {
+        const state = refState.current;
+        if (state) {
+            state.scrollingToOffset = undefined;
+            state.scrollAdjustHandler.setDisableAdjust(false);
+            calculateItemsInView();
+        }
+    };
+
     const scrollTo = (offset: number, animated: boolean | undefined) => {
+        const state = refState.current!;
+
+        // Disable scroll adjust while scrolling so that it doesn't do extra work affecting the target offset
+        state.scrollAdjustHandler.setDisableAdjust(true);
+        state.scrollingToOffset = offset;
+        // Do the scroll
         refScroller.current?.scrollTo({
             x: horizontal ? offset : 0,
             y: horizontal ? 0 : offset,
             animated: !!animated,
         });
+
+        if (!animated) {
+            requestAnimationFrame(finishScrollTo);
+        }
     };
 
     const doMaintainScrollAtEnd = (animated: boolean) => {
@@ -1083,10 +1131,7 @@ const LegendListInner = typedForwardRef(function LegendListInner<T>(
             state.data = dataProp;
 
             if (!isFirst) {
-                // Disable using averages for the next 2 scrolls, because adding items to the top of the list
-                // causes jumpiness if using averages
-                // TODO Figure out why using average caused jumpiness, maybe we can fix it a better way
-                state.disableAveragesForScrolls = 2;
+                disableScrollJumps(2000);
 
                 refState.current!.scrollForNextCalculateItemsInView = undefined;
 
@@ -1278,7 +1323,7 @@ const LegendListInner = typedForwardRef(function LegendListInner<T>(
         if (!didAllocateContainers) {
             checkResetContainers(/*isFirst*/ isFirst);
         }
-    }, [isFirst, dataProp, numColumnsProp]);
+    }, [dataProp, numColumnsProp]);
 
     useEffect(() => {
         set$(ctx, "extraData", extraData);
@@ -1319,7 +1364,7 @@ const LegendListInner = typedForwardRef(function LegendListInner<T>(
         // Allocate containers
         const { scrollLength, data } = state;
         if (scrollLength > 0 && data.length > 0 && !peek$(ctx, "numContainers")) {
-            const averageItemSize = estimatedItemSize ?? getEstimatedItemSize?.(0, data[0]) ?? DEFAULT_ITEM_SIZE;
+            const averageItemSize = getEstimatedItemSize ? getEstimatedItemSize(0, data[0]) : estimatedItemSize;
             const numContainers = Math.ceil((scrollLength + scrollBuffer * 2) / averageItemSize) * numColumnsProp;
 
             for (let i = 0; i < numContainers; i++) {
@@ -1360,7 +1405,17 @@ const LegendListInner = typedForwardRef(function LegendListInner<T>(
 
     const updateItemSize = useCallback((itemKey: string, size: number, fromFixGaps?: boolean) => {
         const state = refState.current!;
-        const { sizes, indexByKey, sizesKnown, data, rowHeights, startBuffered, endBuffered, averageSizes } = state;
+        const {
+            sizes,
+            indexByKey,
+            sizesKnown,
+            data,
+            rowHeights,
+            startBuffered,
+            endBuffered,
+            averageSizes,
+            queuedInitialLayout,
+        } = state;
         if (!data) {
             return;
         }
@@ -1371,9 +1426,10 @@ const LegendListInner = typedForwardRef(function LegendListInner<T>(
             state.minIndexSizeChanged !== undefined ? Math.min(state.minIndexSizeChanged, index) : index;
 
         const prevSize = getItemSize(itemKey, index, data as any);
+        const prevSizeKnown = sizesKnown.get(itemKey);
 
         let needsCalculate = false;
-        const needsUpdateContainersDidLayout = !peek$(ctx, "containersDidLayout");
+        let needsUpdateContainersDidLayout = false;
 
         sizesKnown!.set(itemKey, size);
 
@@ -1424,11 +1480,15 @@ const LegendListInner = typedForwardRef(function LegendListInner<T>(
 
             // Reset scrollForNextCalculateItemsInView because a position may have changed making the previous
             // precomputed scroll range invalid
-            refState.current!.scrollForNextCalculateItemsInView = undefined;
+            state.scrollForNextCalculateItemsInView = undefined;
 
             addTotalSize(itemKey, diff, 0);
 
-            doMaintainScrollAtEnd(false); // *animated*/ index === data.length - 1);
+            // Maintain scroll at end if this item has already rendered and is changing by more than 5px
+            // This prevents a bug where the list will scroll to the bottom when scrolling up and an item lays out
+            if (prevSizeKnown !== undefined && Math.abs(prevSizeKnown - size) > 5) {
+                doMaintainScrollAtEnd(false); // *animated*/ index === data.length - 1);
+            }
 
             if (onItemSizeChanged) {
                 onItemSizeChanged({
@@ -1441,16 +1501,25 @@ const LegendListInner = typedForwardRef(function LegendListInner<T>(
             }
         }
 
+        if (!queuedInitialLayout && checkAllSizesKnown()) {
+            needsUpdateContainersDidLayout = true;
+        }
+
         // We can skip calculating items in view if they have already gone out of view. This can happen on slow
         // devices or when the list is scrolled quickly.
         const isInView = index >= startBuffered && index <= endBuffered;
 
-        if (needsUpdateContainersDidLayout || (!fromFixGaps && needsCalculate && isInView)) {
+        if (needsUpdateContainersDidLayout || (!fromFixGaps && needsCalculate && (isInView || !queuedInitialLayout))) {
             const scrollVelocity = state.scrollVelocity;
             let didCalculate = false;
+
+            // TODO: The second part of this if should be merged into the previous if
+            // Can this be less complex in general?
             if (
-                (Number.isNaN(scrollVelocity) || Math.abs(scrollVelocity) < 1) &&
-                (!waitForInitialLayout || needsUpdateContainersDidLayout)
+                (Number.isNaN(scrollVelocity) ||
+                    Math.abs(scrollVelocity) < 1 ||
+                    state.scrollingToOffset !== undefined) &&
+                (!waitForInitialLayout || needsUpdateContainersDidLayout || queuedInitialLayout)
             ) {
                 // Calculate positions if not currently scrolling and not waiting on other items to layout
                 if (Date.now() - state.lastBatchingAction < 500) {
@@ -1533,6 +1602,22 @@ const LegendListInner = typedForwardRef(function LegendListInner<T>(
                 return;
             }
 
+            if (state.scrollingToOffset !== undefined && Math.abs(newScroll - state.scrollingToOffset) < 10) {
+                finishScrollTo();
+            }
+
+            if (state.disableScrollJumpsFrom !== undefined) {
+                // If the scroll is too far from the disableScrollJumpsFrom position, don't update the scroll position
+                // This is to prevent jumpiness when adding items to the top of the list
+                const scrollMinusAdjust = newScroll - state.scrollAdjustHandler.getAppliedAdjust();
+                if (Math.abs(scrollMinusAdjust - state.disableScrollJumpsFrom) > 200) {
+                    return;
+                }
+
+                // If it's close enough, we're past the jumpiness period so reset the disableScrollJumpsFrom position
+                state.disableScrollJumpsFrom = undefined;
+            }
+
             state.hasScrolled = true;
             state.lastBatchingAction = Date.now();
             const currentTime = performance.now();
@@ -1579,10 +1664,6 @@ const LegendListInner = typedForwardRef(function LegendListInner<T>(
 
             if (!fromSelf) {
                 state.onScroll?.(event as NativeSyntheticEvent<NativeScrollEvent>);
-            }
-
-            if (state.disableAveragesForScrolls) {
-                state.disableAveragesForScrolls--;
             }
         },
         [],

@@ -63,7 +63,7 @@ export type LegendListPropsBase<
 
     /**
      * Ratio of initial container pool size to data length (e.g., 0.5 for half).
-     * @default 1
+     * @default 2
      */
     initialContainerPoolRatio?: number | undefined;
 
@@ -318,7 +318,7 @@ export interface InternalState {
     queuedCalculateItemsInView: number | undefined;
     lastBatchingAction: number;
     ignoreScrollFromCalcTotal?: boolean;
-    disableAveragesForScrolls?: number;
+    disableScrollJumpsFrom?: number;
     scrollingToOffset?: number | undefined;
     averageSizes: Record<
         string,

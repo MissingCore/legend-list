@@ -4,7 +4,7 @@ import { Text } from "react-native";
 import { ContextContainer } from "./ContextContainer";
 import { LeanView } from "./LeanView";
 import { ANCHORED_POSITION_OUT_OF_VIEW, ENABLE_DEVMODE, IsNewArchitecture } from "./constants";
-import { roundSize } from "./helpers";
+import { isNullOrUndefined, roundSize } from "./helpers";
 import { use$, useStateContext } from "./state";
 
 export const Container = <ItemT,>({
@@ -89,17 +89,25 @@ export const Container = <ItemT,>({
     }, []);
 
     const onLayout = (event: LayoutChangeEvent) => {
-        if (itemKey !== undefined) {
+        if (!isNullOrUndefined(itemKey)) {
             const layout = event.nativeEvent.layout;
-            const size = roundSize(layout[horizontal ? "width" : "height"]);
+            let size = roundSize(layout[horizontal ? "width" : "height"]);
 
-            // Old architecture sometimes returns 0 size and then updates it with the correct size
-            if (!IsNewArchitecture && size === 0 && layout.x === 0 && layout.y === 0) {
-                return;
+            const doUpdate = () => {
+                refLastSize.current = size;
+                updateItemSize(itemKey, size);
+            };
+
+            if (IsNewArchitecture || size > 0) {
+                doUpdate();
+            } else {
+                // On old architecture, the size can be 0 sometimes, maybe when not fully rendered?
+                // So we need to make sure it's actually rendered and measure it to make sure it's actually 0.
+                ref.current?.measure?.((x, y, width, height) => {
+                    size = roundSize(horizontal ? width : height);
+                    doUpdate();
+                });
             }
-
-            refLastSize.current = size;
-            updateItemSize(itemKey, size);
 
             // const otherAxisSize = horizontal ? event.nativeEvent.layout.width : event.nativeEvent.layout.height;
             // set$(ctx, "otherAxisSize", Math.max(otherAxisSize, peek$(ctx, "otherAxisSize") || 0));
@@ -109,7 +117,7 @@ export const Container = <ItemT,>({
     if (IsNewArchitecture) {
         // New architecture supports unstable_getBoundingClientRect for getting layout synchronously
         useLayoutEffect(() => {
-            if (itemKey !== undefined) {
+            if (!isNullOrUndefined(itemKey)) {
                 // @ts-expect-error unstable_getBoundingClientRect is unstable and only on Fabric
                 const measured = ref.current?.unstable_getBoundingClientRect?.();
                 if (measured) {
@@ -128,7 +136,7 @@ export const Container = <ItemT,>({
             // Catch a bug where a container is reused and is the exact same size as the previous item
             // so it does not fire an onLayout, so we need to trigger it manually.
             // TODO: There must be a better way to do this?
-            if (itemKey) {
+            if (!isNullOrUndefined(itemKey)) {
                 const timeout = setTimeout(() => {
                     if (!didLayout && refLastSize.current) {
                         updateItemSize(itemKey, refLastSize.current);
