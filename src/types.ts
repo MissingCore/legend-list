@@ -243,12 +243,6 @@ export type LegendListPropsBase<
      * @default false
      */
     disableScrollTopOnDataChange?: boolean;
-    /**
-     * If true, use `undefined` instead of `null` to reset `containerItemKey${i}`
-     * and `containerItemKey${i}` in `checkResetContainers` (pre-`beta.53` behavior).
-     * @default false
-     */
-    resetWithUndefined?: boolean;
 };
 
 export interface ColumnWrapperStyle {
